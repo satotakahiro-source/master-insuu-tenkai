@@ -1,0 +1,925 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Shuffle, RefreshCw, Trophy, Brain, Settings, 
+  Layers, Users, ArrowRight, BookOpen, Crown, Ghost, Hand,
+  Sparkles, MessageCircle, X, Send
+} from 'lucide-react';
+
+/**
+ * 問題データ定義
+ */
+const PROBLEM_SETS = {
+  easy: [
+    { pairId: 'e1', factored: '(x+1)(x+1)', expanded: 'x^2+2x+1' },
+    { pairId: 'e2', factored: '(x+2)(x+3)', expanded: 'x^2+5x+6' },
+    { pairId: 'e3', factored: '(x+1)(x-1)', expanded: 'x^2-1' },
+    { pairId: 'e4', factored: '(x+4)(x+5)', expanded: 'x^2+9x+20' },
+    { pairId: 'e5', factored: '(x-3)(x-3)', expanded: 'x^2-6x+9' },
+    { pairId: 'e6', factored: 'x(x+5)', expanded: 'x^2+5x' },
+  ],
+  medium: [
+    { pairId: 'm1', factored: '(x+3)(x-2)', expanded: 'x^2+x-6' },
+    { pairId: 'm2', factored: '(x-4)(x+1)', expanded: 'x^2-3x-4' },
+    { pairId: 'm3', factored: '(x-5)(x-6)', expanded: 'x^2-11x+30' },
+    { pairId: 'm4', factored: '(x+8)(x-8)', expanded: 'x^2-64' },
+    { pairId: 'm5', factored: '(x+2)(x-5)', expanded: 'x^2-3x-10' },
+    { pairId: 'm6', factored: '(x-9)(x+2)', expanded: 'x^2-7x-18' },
+  ],
+  hard: [
+    { pairId: 'h1', factored: '(2x+1)(x+1)', expanded: '2x^2+3x+1' },
+    { pairId: 'h2', factored: '(2x-1)(2x+1)', expanded: '4x^2-1' },
+    { pairId: 'h3', factored: '(3x+2)(x-1)', expanded: '3x^2-x-2' },
+    { pairId: 'h4', factored: '(x+y)(x-y)', expanded: 'x^2-y^2' },
+    { pairId: 'h5', factored: '(2x-3)^2', expanded: '4x^2-12x+9' },
+    { pairId: 'h6', factored: '(x+2y)(x-2y)', expanded: 'x^2-4y^2' },
+  ]
+};
+
+// Gemini API Call Helper
+const callGemini = async (prompt, systemInstruction = "") => {
+  const apiKey = ""; // Running in environment with API key
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+        }),
+      }
+    );
+    
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error("API Error Details:", errorData);
+        throw new Error(`API call failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "申し訳ありません。解説を生成できませんでした。";
+  } catch (error) {
+    console.error("Gemini API Error:", error);
+    return "エラーが発生しました。もう一度お試しください。";
+  }
+};
+
+// 全問題を取得するヘルパー
+const getAllProblems = () => {
+  return [
+    ...PROBLEM_SETS.easy,
+    ...PROBLEM_SETS.medium,
+    ...PROBLEM_SETS.hard
+  ];
+};
+
+// 数式レンダリングコンポーネント
+const MathRender = ({ text, className = "" }) => {
+  if (!text) return null;
+  // JOKERの場合
+  if (text === 'JOKER') return <span className={`font-bold text-red-500 ${className}`}>JOKER</span>;
+
+  const parts = text.split(/(\^2)/g);
+  return (
+    <span className={`font-serif tracking-wider font-medium ${className}`}>
+      {parts.map((part, i) => 
+        part === '^2' ? <sup key={i} className="text-xs">2</sup> : part
+      )}
+    </span>
+  );
+};
+
+// 共通カード生成ロジック
+const generateCards = (level) => {
+  const problems = level === 'all' ? getAllProblems() : PROBLEM_SETS[level];
+  let newCards = [];
+  problems.forEach(p => {
+    newCards.push({ id: `${p.pairId}-f`, pairId: p.pairId, content: p.factored, type: 'factored' });
+    newCards.push({ id: `${p.pairId}-e`, pairId: p.pairId, content: p.expanded, type: 'expanded' });
+  });
+  return newCards.sort(() => Math.random() - 0.5);
+};
+
+// --- AI Chat Modal Component ---
+const AIChatModal = ({ onClose }) => {
+  const [messages, setMessages] = useState([
+    { role: 'model', text: 'こんにちは！数学の先生AIです。式の展開や因数分解、その他数学の質問があれば何でも聞いてくださいね。' }
+  ]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userMessage = input;
+    setMessages(prev => [...prev, { role: 'user', text: userMessage }]);
+    setInput('');
+    setIsLoading(true);
+
+    const systemPrompt = "あなたは親切で分かりやすい数学の先生です。中学生・高校生向けに、数学の質問（特に式の展開や因数分解）に答えてください。数式はきれいに整形して説明してください。";
+    
+    // Build context from previous messages (simplified)
+    const contextPrompt = messages.slice(-4).map(m => `${m.role === 'user' ? '生徒' : '先生'}: ${m.text}`).join('\n') + `\n生徒: ${userMessage}`;
+
+    const reply = await callGemini(contextPrompt, systemPrompt);
+
+    setMessages(prev => [...prev, { role: 'model', text: reply }]);
+    setIsLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-md h-[500px] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-fade-in-up">
+        {/* Header */}
+        <div className="bg-indigo-600 p-4 flex items-center justify-between text-white">
+          <div className="flex items-center gap-2">
+            <Sparkles size={20} className="text-yellow-300" />
+            <span className="font-bold">AI先生に質問</span>
+          </div>
+          <button onClick={onClose} className="hover:bg-indigo-700 p-1 rounded-full transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] p-3 rounded-2xl text-sm leading-relaxed ${
+                msg.role === 'user' 
+                  ? 'bg-indigo-600 text-white rounded-tr-none' 
+                  : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'
+              }`}>
+                {msg.text.split('\n').map((line, i) => (
+                    <React.Fragment key={i}>
+                        {line}
+                        {i < msg.text.split('\n').length - 1 && <br />}
+                    </React.Fragment>
+                ))}
+              </div>
+            </div>
+          ))}
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="bg-white border border-slate-200 p-3 rounded-2xl rounded-tl-none shadow-sm">
+                <div className="flex gap-1">
+                  <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+                  <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                  <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Input */}
+        <div className="p-4 bg-white border-t border-slate-100 flex gap-2">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+            placeholder="因数分解のコツは？"
+            className="flex-1 px-4 py-2 border border-slate-200 rounded-full focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all text-sm"
+          />
+          <button 
+            onClick={handleSend}
+            disabled={!input.trim() || isLoading}
+            className="p-2 bg-indigo-600 text-white rounded-full hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Send size={18} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// --- サブゲームコンポーネント: 神経衰弱 ---
+const MemoryGame = ({ onBack }) => {
+  const [difficulty, setDifficulty] = useState('easy');
+  const [cards, setCards] = useState([]);
+  const [flippedCards, setFlippedCards] = useState([]);
+  const [matchedPairs, setMatchedPairs] = useState([]);
+  const [moves, setMoves] = useState(0);
+  const [gameStatus, setGameStatus] = useState('playing');
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  useEffect(() => {
+    initializeGame(difficulty);
+  }, [difficulty]);
+
+  const initializeGame = (level) => {
+    const newCards = generateCards(level);
+    setCards(newCards);
+    setFlippedCards([]);
+    setMatchedPairs([]);
+    setMoves(0);
+    setGameStatus('playing');
+    setIsProcessing(false);
+  };
+
+  const handleCardClick = (card) => {
+    if (matchedPairs.includes(card.pairId) || flippedCards.find(c => c.id === card.id) || isProcessing) return;
+
+    const newFlipped = [...flippedCards, card];
+    setFlippedCards(newFlipped);
+
+    if (newFlipped.length === 2) {
+      setMoves(m => m + 1);
+      setIsProcessing(true);
+      const [c1, c2] = newFlipped;
+      if (c1.pairId === c2.pairId) {
+        setMatchedPairs(prev => [...prev, c1.pairId]);
+        setFlippedCards([]);
+        setIsProcessing(false);
+      } else {
+        setTimeout(() => {
+          setFlippedCards([]);
+          setIsProcessing(false);
+        }, 1500);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (cards.length > 0 && matchedPairs.length === cards.length / 2) {
+      setGameStatus('won');
+    }
+  }, [matchedPairs, cards]);
+
+  return (
+    <div className="w-full">
+      <div className="flex flex-wrap items-center justify-between mb-6 gap-4 bg-white p-4 rounded-xl shadow-sm">
+        <div className="flex items-center gap-2">
+           <button onClick={onBack} className="text-slate-500 hover:bg-slate-100 p-2 rounded-full"><ArrowRight className="rotate-180" /></button>
+           <h2 className="text-xl font-bold text-slate-700">神経衰弱</h2>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex bg-slate-100 p-1 rounded-lg text-sm">
+            {['easy', 'medium', 'hard'].map(d => (
+              <button key={d} onClick={() => setDifficulty(d)} className={`px-3 py-1 rounded ${difficulty === d ? 'bg-white shadow text-indigo-600' : 'text-slate-500'}`}>
+                {d === 'easy' ? '初級' : d === 'medium' ? '中級' : '上級'}
+              </button>
+            ))}
+          </div>
+          <div className="px-3 py-1 bg-slate-50 border rounded font-mono text-indigo-600 font-bold">{moves}手</div>
+          <button onClick={() => initializeGame(difficulty)} className="p-2 bg-indigo-50 text-indigo-600 rounded-full hover:bg-indigo-100"><RefreshCw size={18} /></button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 relative">
+        {cards.map(card => {
+          const isFlipped = flippedCards.some(c => c.id === card.id) || matchedPairs.includes(card.pairId);
+          const isMatched = matchedPairs.includes(card.pairId);
+          return (
+            <div key={card.id} onClick={() => handleCardClick(card)} className="aspect-[4/3] perspective-1000 cursor-pointer">
+              <div className={`w-full h-full transition-all duration-500 transform-style-3d relative ${isFlipped ? 'rotate-y-180' : ''}`}>
+                <div className="absolute inset-0 backface-hidden bg-indigo-50 border-2 border-indigo-100 rounded-xl flex items-center justify-center">
+                  <span className="text-3xl text-indigo-200 font-bold">?</span>
+                </div>
+                <div className={`absolute inset-0 backface-hidden rotate-y-180 bg-white border-2 rounded-xl flex flex-col items-center justify-center p-2 text-center shadow-sm ${isMatched ? 'border-green-400 bg-green-50' : 'border-indigo-200'}`}>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{card.type === 'expanded' ? '展開' : '因数分解'}</span>
+                  <MathRender text={card.content} className="text-lg" />
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {gameStatus === 'won' && (
+          <div className="absolute inset-0 flex items-center justify-center z-10 bg-white/50 backdrop-blur-sm rounded-xl">
+             <div className="bg-white p-6 rounded-2xl shadow-xl border-4 border-indigo-100 text-center animate-bounce-in">
+                <Trophy size={48} className="mx-auto text-yellow-400 mb-2" />
+                <h3 className="text-2xl font-bold text-slate-800">Clear!</h3>
+                <p className="text-slate-500 mb-4">{moves}手でクリアしました</p>
+                <button onClick={() => initializeGame(difficulty)} className="px-6 py-2 bg-indigo-600 text-white rounded-full font-bold shadow hover:bg-indigo-700">もう一度</button>
+             </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// --- サブゲームコンポーネント: フラッシュカード ---
+const FlashCardGame = ({ onBack }) => {
+  const [cards, setCards] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [explanation, setExplanation] = useState(null); // AI解説テキスト
+  const [isLoadingExplanation, setIsLoadingExplanation] = useState(false);
+
+  useEffect(() => {
+    // 全問題をペアで取得してシャッフル
+    const allProblems = getAllProblems().sort(() => Math.random() - 0.5);
+    setCards(allProblems);
+  }, []);
+
+  const handleNext = () => {
+    setIsFlipped(false);
+    setExplanation(null);
+    setTimeout(() => {
+      setCurrentIndex((prev) => (prev + 1) % cards.length);
+    }, 200);
+  };
+
+  const handlePrev = () => {
+    setIsFlipped(false);
+    setExplanation(null);
+    setTimeout(() => {
+      setCurrentIndex((prev) => (prev - 1 + cards.length) % cards.length);
+    }, 200);
+  };
+
+  const handleAIExplain = async (e) => {
+    e.stopPropagation(); // カード反転防止
+    if (isLoadingExplanation || explanation) return;
+
+    setIsLoadingExplanation(true);
+    const currentCard = cards[currentIndex];
+    
+    const prompt = `
+      中学生に数学を教えるように、以下の数式の展開（または因数分解）の過程をステップバイステップで分かりやすく解説してください。
+      
+      因数分解形: ${currentCard.factored}
+      展開形: ${currentCard.expanded}
+      
+      出力は簡潔にお願いします。
+    `;
+
+    const result = await callGemini(prompt, "あなたは数学の先生です。");
+    setExplanation(result);
+    setIsLoadingExplanation(false);
+  };
+
+  if (cards.length === 0) return <div>Loading...</div>;
+
+  const currentCard = cards[currentIndex];
+
+  return (
+    <div className="w-full max-w-2xl mx-auto flex flex-col h-[85vh]">
+      <div className="flex items-center gap-2 mb-4">
+        <button onClick={onBack} className="text-slate-500 hover:bg-slate-100 p-2 rounded-full"><ArrowRight className="rotate-180" /></button>
+        <h2 className="text-xl font-bold text-slate-700">フラッシュカード</h2>
+        <span className="ml-auto text-sm text-slate-400">{currentIndex + 1} / {cards.length}</span>
+      </div>
+
+      <div className="flex-1 flex flex-col items-center justify-center perspective-1000 min-h-[400px]">
+        <div 
+          onClick={() => setIsFlipped(!isFlipped)}
+          className={`relative w-full max-w-md cursor-pointer transition-all duration-500 transform-style-3d ${isFlipped ? 'rotate-y-180' : ''}`}
+          style={{ height: '300px' }} // 固定高さ
+        >
+          {/* 表面 (因数分解形) */}
+          <div className="absolute inset-0 backface-hidden bg-white rounded-3xl shadow-lg border-2 border-slate-100 flex flex-col items-center justify-center p-8 hover:shadow-xl transition-shadow">
+            <span className="absolute top-6 left-6 text-sm font-bold text-blue-500 bg-blue-50 px-3 py-1 rounded-full">QUESTION</span>
+            <div className="text-center">
+              <p className="text-slate-400 text-sm mb-4">次の式を展開せよ</p>
+              <MathRender text={currentCard.factored} className="text-4xl text-slate-800" />
+            </div>
+            <p className="absolute bottom-6 text-slate-400 text-xs animate-pulse">タップして答えを表示</p>
+          </div>
+
+          {/* 裏面 (展開形) */}
+          <div className="absolute inset-0 backface-hidden rotate-y-180 bg-indigo-600 rounded-3xl shadow-lg flex flex-col items-center justify-center p-8 text-white">
+            <span className="absolute top-6 left-6 text-sm font-bold text-white bg-white/20 px-3 py-1 rounded-full">ANSWER</span>
+            <div className="text-center mb-6">
+              <MathRender text={currentCard.expanded} className="text-4xl" />
+            </div>
+            
+            {/* AI解説ボタン */}
+            <button 
+                onClick={handleAIExplain}
+                className="flex items-center gap-2 px-4 py-2 bg-white/20 hover:bg-white/30 rounded-full text-sm font-bold transition-all border border-white/40"
+            >
+                <Sparkles size={16} />
+                {isLoadingExplanation ? "AIが考え中..." : "AI解説を見る"}
+            </button>
+          </div>
+        </div>
+
+        {/* 解説表示エリア (カードの下に表示) */}
+        {explanation && (
+          <div className="mt-6 w-full max-w-md bg-white p-4 rounded-xl shadow-md border border-indigo-100 animate-fade-in-up">
+            <div className="flex items-center gap-2 mb-2 text-indigo-600 font-bold text-sm">
+                <Sparkles size={16} />
+                AI先生の解説
+            </div>
+            <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{explanation}</p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center justify-center gap-6 mt-4 pb-8">
+        <button onClick={handlePrev} className="p-4 rounded-full bg-white shadow hover:bg-slate-50 text-slate-600 border border-slate-200">
+          <ArrowRight className="rotate-180" size={24} />
+        </button>
+        <button onClick={() => setIsFlipped(!isFlipped)} className="px-8 py-3 rounded-xl bg-indigo-100 text-indigo-700 font-bold hover:bg-indigo-200 transition-colors">
+          {isFlipped ? '問題に戻る' : '答えを見る'}
+        </button>
+        <button onClick={handleNext} className="p-4 rounded-full bg-indigo-600 shadow-lg shadow-indigo-200 hover:bg-indigo-700 text-white">
+          <ArrowRight size={24} />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// --- サブゲームコンポーネント: ババ抜き ---
+const OldMaidGame = ({ onBack }) => {
+  // プレイヤー定義: 0:Player, 1-4:CPU
+  const [players, setPlayers] = useState([[], [], [], [], []]); 
+  const [turn, setTurn] = useState(0); // 0:Player, 1:CPU1...
+  const [turnPhase, setTurnPhase] = useState('draw'); // 'draw' (引く) or 'discard' (捨てる)
+  const [gameState, setGameState] = useState('dealing'); // dealing, playing, finished
+  const [winners, setWinners] = useState([]);
+  const [message, setMessage] = useState('カードを配っています...');
+  const [isProcessing, setIsProcessing] = useState(false); // 処理中フラグ
+  const [selectedCardIds, setSelectedCardIds] = useState([]); // プレイヤーが手動選択したカード
+
+  // 初期化
+  useEffect(() => {
+    startNewGame();
+  }, []);
+
+  const startNewGame = () => {
+    setGameState('dealing');
+    setWinners([]);
+    setTurn(0);
+    setTurnPhase('draw');
+    setMessage('カードを配っています...');
+    setIsProcessing(false);
+    setSelectedCardIds([]);
+
+    // 全カード+JOKER作成
+    let deck = generateCards('all');
+    deck.push({ id: 'joker', pairId: 'joker', content: 'JOKER', type: 'joker' });
+    deck.sort(() => Math.random() - 0.5);
+
+    // 5人に配る
+    const hands = [[], [], [], [], []];
+    deck.forEach((card, i) => {
+      hands[i % 5].push(card);
+    });
+
+    // 初期の手札整理（自動）
+    const initialHands = hands.map(hand => removePairs(hand));
+    
+    setTimeout(() => {
+      setPlayers(initialHands);
+      setGameState('playing');
+      setMessage('あなたの番です。CPU4の手札から1枚選んでください。');
+    }, 1000);
+  };
+
+  // ペア削除ロジック（CPUや初期配布用）
+  const removePairs = (hand) => {
+    const newHand = [...hand];
+    const pairs = [];
+    for (let i = 0; i < newHand.length; i++) {
+      for (let j = i + 1; j < newHand.length; j++) {
+        if (newHand[i].pairId === newHand[j].pairId && newHand[i].pairId !== 'joker') {
+          if (!pairs.includes(newHand[i].id) && !pairs.includes(newHand[j].id)) {
+            pairs.push(newHand[i].id, newHand[j].id);
+          }
+        }
+      }
+    }
+    return newHand.filter(c => !pairs.includes(c.id));
+  };
+
+  // 手札内にペアが存在するかチェック（プレイヤー用）
+  const hasPair = (hand) => {
+    for (let i = 0; i < hand.length; i++) {
+      for (let j = i + 1; j < hand.length; j++) {
+        if (hand[i].pairId === hand[j].pairId && hand[i].pairId !== 'joker') {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  // 勝敗・終了判定
+  useEffect(() => {
+    if (gameState !== 'playing') return;
+
+    // 手札ゼロなら勝者へ
+    players.forEach((hand, idx) => {
+      if (hand.length === 0) {
+        setWinners(prev => {
+          if (prev.includes(idx)) return prev;
+          return [...prev, idx];
+        });
+      }
+    });
+
+    // 残り人数チェック
+    const remainingPlayers = players.map((_, i) => i).filter(i => !winners.includes(i) && players[i].length > 0);
+    
+    if (remainingPlayers.length <= 1 && winners.length >= 4) {
+      setGameState('finished');
+      if (remainingPlayers.length === 1) {
+         setWinners(prev => {
+             if (prev.includes(remainingPlayers[0])) return prev;
+             return [...prev, remainingPlayers[0]];
+         });
+      }
+      setMessage('ゲーム終了！');
+    }
+  }, [players, gameState, winners]);
+
+  // CPUのターン処理
+  useEffect(() => {
+    if (gameState !== 'playing') return;
+
+    // プレイヤーが上がっている場合、ターンをスキップ
+    if (winners.includes(turn)) {
+      setTurn(prev => (prev + 1) % 5);
+      return;
+    }
+
+    // プレイヤーのターンになったらフェーズをdrawに戻す
+    if (turn === 0) {
+      setTurnPhase('draw');
+      setSelectedCardIds([]); // 選択解除
+    }
+
+    // CPUのターン
+    if (turn !== 0) {
+      const cpuAction = async () => {
+        // 引く相手を探す
+        let targetPlayerIdx = (turn + 4) % 5;
+        let loopCount = 0;
+        while ((winners.includes(targetPlayerIdx) || players[targetPlayerIdx].length === 0) && loopCount < 5) {
+          targetPlayerIdx = (targetPlayerIdx + 4) % 5;
+          loopCount++;
+        }
+        
+        if (targetPlayerIdx === turn || loopCount >= 5) {
+            setTurn(prev => (prev + 1) % 5);
+            return;
+        }
+        
+        setMessage(`CPU${turn}が思考中...`);
+        await new Promise(r => setTimeout(r, 1000));
+
+        // カード移動とペア自動削除
+        setPlayers(currentPlayers => {
+            const targetHand = currentPlayers[targetPlayerIdx];
+            if (targetHand.length === 0) return currentPlayers;
+
+            const randomIndex = Math.floor(Math.random() * targetHand.length);
+            const drawnCard = targetHand[randomIndex];
+
+            const newPlayers = [...currentPlayers];
+            newPlayers[targetPlayerIdx] = targetHand.filter((_, i) => i !== randomIndex);
+            const newHand = [...newPlayers[turn], drawnCard];
+            newPlayers[turn] = removePairs(newHand); // CPUは自動削除
+            return newPlayers;
+        });
+
+        setTurn(prev => (prev + 1) % 5);
+      };
+      cpuAction();
+    } else {
+      // プレイヤーのターン表示
+      let targetPlayerIdx = 4;
+      let loopCount = 0;
+      while ((winners.includes(targetPlayerIdx) || players[targetPlayerIdx].length === 0) && loopCount < 5) {
+        targetPlayerIdx = (targetPlayerIdx + 4) % 5;
+        loopCount++;
+      }
+      if (turnPhase === 'draw') {
+        setMessage(`あなたの番です。${targetPlayerIdx === 0 ? '誰もいません' : `CPU${targetPlayerIdx}の手札`}からカードを引いてください。`);
+      } else {
+        setMessage('手札を確認し、揃っているカードがあればタップして捨ててください。なければ「ターン終了」を押してください。');
+      }
+    }
+  }, [turn, gameState, winners]); 
+
+
+  // プレイヤーがカードを引く処理
+  const handlePlayerDraw = (targetPlayerIdx, cardIndex) => {
+    if (turn !== 0 || gameState !== 'playing' || turnPhase !== 'draw') return;
+    if (isProcessing) return;
+
+    // 引く相手チェック
+    let correctTarget = 4;
+    let loopCount = 0;
+    while ((winners.includes(correctTarget) || players[correctTarget].length === 0) && loopCount < 5) {
+      correctTarget = (correctTarget + 4) % 5;
+      loopCount++;
+    }
+
+    if (targetPlayerIdx !== correctTarget) return;
+
+    setIsProcessing(true);
+
+    // カード移動のみ（ペア削除はしない）
+    setPlayers(currentPlayers => {
+        const newPlayers = [...currentPlayers];
+        const drawnCard = newPlayers[targetPlayerIdx][cardIndex];
+        
+        // 相手の手札から削除
+        newPlayers[targetPlayerIdx] = newPlayers[targetPlayerIdx].filter((_, i) => i !== cardIndex);
+        
+        // 自分の手札に追加
+        newPlayers[0] = [...newPlayers[0], drawnCard];
+        
+        return newPlayers;
+    });
+
+    // 演出後、捨てるフェーズへ
+    setTimeout(() => {
+        setIsProcessing(false);
+        setTurnPhase('discard');
+        setMessage('手札を確認し、揃っているカードがあればタップして捨ててください。');
+    }, 500);
+  };
+
+  // プレイヤーが自分の手札をクリック（ペア選択・解除）
+  const handleUserCardClick = (cardId) => {
+    if (turn !== 0 || turnPhase !== 'discard' || gameState !== 'playing') return;
+
+    // 選択済みの場合は解除
+    if (selectedCardIds.includes(cardId)) {
+      setSelectedCardIds(prev => prev.filter(id => id !== cardId));
+      return;
+    }
+
+    // 新規選択
+    const newSelected = [...selectedCardIds, cardId];
+    
+    // 2枚選択されたら判定
+    if (newSelected.length === 2) {
+      const hand = players[0];
+      const card1 = hand.find(c => c.id === newSelected[0]);
+      const card2 = hand.find(c => c.id === newSelected[1]);
+
+      if (card1 && card2 && card1.pairId === card2.pairId && card1.pairId !== 'joker') {
+        // 正解ペア
+        setMessage("ペア成立！");
+        setTimeout(() => {
+          setPlayers(prev => {
+            const newPlayers = [...prev];
+            newPlayers[0] = prev[0].filter(c => c.id !== card1.id && c.id !== card2.id);
+            return newPlayers;
+          });
+          setSelectedCardIds([]);
+          setMessage('他に揃っているカードはありますか？なければ「ターン終了」を押してください。');
+        }, 500);
+      } else {
+        // 不正解
+        setSelectedCardIds(newSelected); // 一瞬見せる
+        setMessage("ペアではありません");
+        setTimeout(() => {
+          setSelectedCardIds([]);
+          setMessage('手札を確認し、揃っているカードがあればタップして捨ててください。');
+        }, 1000);
+      }
+    } else {
+      setSelectedCardIds(newSelected);
+    }
+  };
+
+  // ターン終了ボタン処理
+  const handleTurnEnd = () => {
+    // ペアが残っているかチェック
+    if (hasPair(players[0])) {
+      setMessage("まだ揃っているカードがあります！探してみてください。");
+      return;
+    }
+    // 次のターンへ
+    setTurn(1);
+    setSelectedCardIds([]);
+  };
+
+  const getPlayerPositionStyle = (index) => {
+    switch(index) {
+      case 0: return "bottom-0 left-1/2 -translate-x-1/2"; 
+      case 1: return "top-1/2 left-0 -translate-y-1/2"; 
+      case 2: return "top-0 left-1/4 -translate-x-1/2"; 
+      case 3: return "top-0 right-1/4 translate-x-1/2"; 
+      case 4: return "top-1/2 right-0 -translate-y-1/2"; 
+      default: return "";
+    }
+  };
+
+  return (
+    <div className="w-full h-[calc(100vh-100px)] relative bg-green-800/10 rounded-3xl overflow-hidden border border-green-100 flex flex-col">
+      {/* Header Info */}
+      <div className="absolute top-4 left-4 z-10 flex items-center gap-2 bg-white/80 p-2 rounded-lg backdrop-blur">
+        <button onClick={onBack} className="text-slate-500 hover:bg-slate-100 p-1 rounded-full"><ArrowRight className="rotate-180" size={20} /></button>
+        <span className="font-bold text-slate-700">ババ抜き (5人対戦)</span>
+      </div>
+      
+      {/* Game Area */}
+      <div className="flex-1 relative m-4">
+        {players.map((hand, playerIdx) => {
+          const isUser = playerIdx === 0;
+          const isWinner = winners.includes(playerIdx);
+          const isTurn = turn === playerIdx;
+          
+          let targetPlayerIdx = 4;
+          let loopCount = 0;
+          while ((winners.includes(targetPlayerIdx) || players[targetPlayerIdx].length === 0) && loopCount < 5) {
+            targetPlayerIdx = (targetPlayerIdx + 4) % 5;
+            loopCount++;
+          }
+          // 自分が引くターゲットかどうか
+          const isTarget = turn === 0 && turnPhase === 'draw' && playerIdx === targetPlayerIdx && !isWinner;
+
+          return (
+            <div key={playerIdx} className={`absolute ${getPlayerPositionStyle(playerIdx)} transition-all duration-500 p-2 rounded-xl ${isTurn ? 'bg-yellow-100/50 shadow-lg border-2 border-yellow-400' : ''}`}>
+              <div className="flex flex-col items-center gap-2">
+                {/* Avatar */}
+                <div className="relative">
+                   <div className={`w-12 h-12 rounded-full flex items-center justify-center border-2 ${isUser ? 'bg-indigo-100 border-indigo-400 text-indigo-700' : 'bg-slate-100 border-slate-300 text-slate-500'}`}>
+                     {isUser ? <Users size={24} /> : <Ghost size={24} />}
+                   </div>
+                   {isWinner && <Crown size={24} className="absolute -top-4 -right-2 text-yellow-500 animate-bounce" />}
+                   <span className="absolute -bottom-2 left-1/2 -translate-x-1/2 bg-white text-[10px] px-2 rounded-full border shadow-sm font-bold whitespace-nowrap">
+                     {isUser ? 'あなた' : `CPU${playerIdx}`}
+                   </span>
+                </div>
+
+                {/* Cards */}
+                <div className="flex -space-x-4 min-h-[60px] md:min-h-[80px]">
+                  {hand.map((card, cardIdx) => {
+                    const isSelected = selectedCardIds.includes(card.id);
+                    return (
+                      <div 
+                        key={card.id} 
+                        onClick={() => {
+                          if (isTarget) handlePlayerDraw(playerIdx, cardIdx);
+                          else if (isUser) handleUserCardClick(card.id);
+                        }}
+                        className={`
+                          w-12 h-16 md:w-16 md:h-24 rounded-lg border shadow-sm transition-all hover:-translate-y-2 relative
+                          ${isUser ? 'bg-white border-indigo-200' : 'bg-blue-600 border-blue-800'}
+                          ${isTarget ? 'cursor-pointer hover:bg-blue-500 animate-pulse' : ''}
+                          ${isSelected ? 'ring-4 ring-yellow-400 -translate-y-4 z-10' : ''}
+                          ${isUser && turn === 0 && turnPhase === 'discard' ? 'cursor-pointer hover:border-indigo-400' : ''}
+                        `}
+                      >
+                        {isUser ? (
+                          <div className="flex flex-col items-center justify-center h-full p-1 overflow-hidden select-none">
+                             <span className="text-[8px] text-slate-400">{card.type === 'expanded' ? '展' : card.type === 'factored' ? '因' : ''}</span>
+                             <div className="scale-50 md:scale-75 origin-center">
+                               <MathRender text={card.content} />
+                             </div>
+                          </div>
+                        ) : (
+                          <div className="w-full h-full bg-pattern-check opacity-50"></div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {hand.length === 0 && isWinner && <span className="text-xs font-bold text-yellow-600 bg-yellow-100 px-2 py-1 rounded">WINNER!</span>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Center Control & Message */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center w-full flex flex-col items-center gap-4 pointer-events-none">
+           <div className="bg-white/90 p-4 rounded-xl shadow-lg max-w-xs w-full pointer-events-auto">
+             <p className="text-sm font-bold text-slate-700">{message}</p>
+             
+             {/* ターン終了ボタン（プレイヤーの手番で、捨てるフェーズの時のみ） */}
+             {turn === 0 && turnPhase === 'discard' && gameState === 'playing' && (
+               <button 
+                 onClick={handleTurnEnd}
+                 className="mt-4 w-full py-2 bg-indigo-600 text-white rounded-lg font-bold shadow hover:bg-indigo-700 active:scale-95 transition-all"
+               >
+                 揃っていない (ターン終了)
+               </button>
+             )}
+
+             {gameState === 'finished' && (
+               <div className="mt-4">
+                 <p className="text-indigo-600 font-bold mb-2">順位</p>
+                 <ol className="text-sm text-left inline-block">
+                   {winners.map((pid, idx) => (
+                     <li key={pid}>{idx+1}位: {pid === 0 ? 'あなた' : `CPU${pid}`}</li>
+                   ))}
+                 </ol>
+                 <button onClick={startNewGame} className="mt-4 w-full py-2 bg-indigo-600 text-white rounded-lg font-bold pointer-events-auto">もう一度遊ぶ</button>
+               </div>
+             )}
+           </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// --- メインアプリ ---
+export default function App() {
+  const [mode, setMode] = useState('menu'); // menu, memory, flashcard, oldmaid
+  const [showChat, setShowChat] = useState(false);
+
+  const renderContent = () => {
+    switch(mode) {
+      case 'memory': return <MemoryGame onBack={() => setMode('menu')} />;
+      case 'flashcard': return <FlashCardGame onBack={() => setMode('menu')} />;
+      case 'oldmaid': return <OldMaidGame onBack={() => setMode('menu')} />;
+      default: return (
+        <div className="flex flex-col items-center justify-center min-h-[60vh] gap-6 animate-fade-in-up">
+          <div className="text-center mb-8">
+            <h1 className="text-4xl font-bold text-slate-800 mb-2 flex items-center justify-center gap-3">
+              <Brain size={40} className="text-indigo-600" />
+              Math Games
+            </h1>
+            <p className="text-slate-500">展開と因数分解をマスターしよう</p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-4xl px-4">
+            <button 
+              onClick={() => setMode('memory')}
+              className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 hover:shadow-lg hover:border-indigo-300 transition-all text-left group"
+            >
+              <div className="bg-indigo-100 w-12 h-12 rounded-xl flex items-center justify-center text-indigo-600 mb-4 group-hover:scale-110 transition-transform">
+                <Layers size={24} />
+              </div>
+              <h3 className="text-xl font-bold text-slate-800 mb-2">神経衰弱</h3>
+              <p className="text-sm text-slate-500">ペアを見つけて記憶力と計算力を鍛えよう。難易度選択あり。</p>
+            </button>
+
+            <button 
+              onClick={() => setMode('flashcard')}
+              className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 hover:shadow-lg hover:border-green-300 transition-all text-left group"
+            >
+              <div className="bg-green-100 w-12 h-12 rounded-xl flex items-center justify-center text-green-600 mb-4 group-hover:scale-110 transition-transform">
+                <BookOpen size={24} />
+              </div>
+              <h3 className="text-xl font-bold text-slate-800 mb-2">フラッシュカード</h3>
+              <p className="text-sm text-slate-500">次々と現れる数式を解こう。サクサク学習モード。<span className="text-indigo-600 font-bold ml-1 text-xs">AI解説付き✨</span></p>
+            </button>
+
+            <button 
+              onClick={() => setMode('oldmaid')}
+              className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 hover:shadow-lg hover:border-orange-300 transition-all text-left group"
+            >
+              <div className="bg-orange-100 w-12 h-12 rounded-xl flex items-center justify-center text-orange-600 mb-4 group-hover:scale-110 transition-transform">
+                <Users size={24} />
+              </div>
+              <h3 className="text-xl font-bold text-slate-800 mb-2">ババ抜き対戦</h3>
+              <p className="text-sm text-slate-500">COM4人と対戦！ペアを捨てて早く上がろう。運と実力の勝負。</p>
+            </button>
+          </div>
+
+          {/* AI Chat Button */}
+          <button 
+            onClick={() => setShowChat(true)}
+            className="mt-8 flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-full font-bold shadow-lg hover:scale-105 transition-transform"
+          >
+            <MessageCircle size={20} />
+            ✨ AI先生に質問
+          </button>
+        </div>
+      );
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-indigo-100 p-4 md:p-8">
+      {renderContent()}
+      
+      {showChat && <AIChatModal onClose={() => setShowChat(false)} />}
+      
+      {/* Global Styles */}
+      <style>{`
+        .perspective-1000 { perspective: 1000px; }
+        .transform-style-3d { transform-style: preserve-3d; }
+        .backface-hidden { backface-visibility: hidden; }
+        .rotate-y-180 { transform: rotateY(180deg); }
+        .bg-pattern-check {
+          background-image: radial-gradient(#ffffff 20%, transparent 20%), radial-gradient(#ffffff 20%, transparent 20%);
+          background-color: #4f46e5;
+          background-position: 0 0, 10px 10px;
+          background-size: 20px 20px;
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade-in-up { animation: fadeIn 0.5s ease-out forwards; }
+      `}</style>
+    </div>
+  );
+}
